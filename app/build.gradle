@@ -1,0 +1,17 @@
+// app/build.gradle
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace 'com.example.lifesim'
+    compileSdk 34
+
+    defaultConfig {
+        applicationId "com.example.lifesim"
+        minSdk 24
+        targetSdk 34
+        versionCode 1
+        versionName "1.0"
+    }
+}
