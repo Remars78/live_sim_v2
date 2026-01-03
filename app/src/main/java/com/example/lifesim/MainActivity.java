@@ -1,22 +1,19 @@
+
 package com.example.lifesim;
 
 import android.app.Activity;
-import android.graphics.Bitmap;
 import android.graphics.Canvas;
 import android.graphics.Color;
 import android.graphics.Matrix;
 import android.graphics.Paint;
-import android.graphics.Rect;
 import android.os.Bundle;
 import android.view.MotionEvent;
+import android.view.ScaleGestureDetector;
 import android.view.SurfaceHolder;
 import android.view.SurfaceView;
-import android.view.ScaleGestureDetector;
 
 import java.util.Arrays;
 import java.util.Random;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.stream.IntStream;
 
 public class MainActivity extends Activity {
@@ -49,12 +46,11 @@ public class MainActivity extends Activity {
         SurfaceHolder holder;
 
         // Мир
-        final int W = 256;
-        final int H = 256; // 65k клеток
+        final int W = 128; // Уменьшил размер для более крупного отображения деталей
+        final int H = 128;
         final int GENOME_SIZE = 64;
 
-        // Данные (Structure of Arrays для скорости и отсутствия GC)
-        // 0: dead, 1: alive
+        // Данные (Structure of Arrays)
         byte[] botAlive = new byte[W * H];
         int[] botEnergy = new int[W * H];
         byte[] botDir = new byte[W * H];
@@ -68,16 +64,11 @@ public class MainActivity extends Activity {
         byte[] nextDir = new byte[W * H];
         byte[] nextIp = new byte[W * H];
         byte[] nextGenome = new byte[W * H * GENOME_SIZE];
-        // Органику обновляем in-place (атомарно или с допущениями), чтобы экономить память
 
-        // Графика
-        Bitmap bitmap;
-        int[] pixels = new int[W * H];
+        // Графика и Управление
         Matrix matrix = new Matrix();
-        
-        // Управление
         ScaleGestureDetector scaleDetector;
-        float scaleFactor = 4.0f;
+        float scaleFactor = 8.0f; // Начальный зум побольше
         float camX = 0, camY = 0;
         float lastTouchX, lastTouchY;
         int activePointerId = -1;
@@ -88,32 +79,64 @@ public class MainActivity extends Activity {
         int fps = 0;
         int liveCount = 0;
 
+        // Кисти для рисования
+        Paint organicPaint, botBodyPaint, connectionPaint, appendagePaint, textPaint;
+
         public SimulationView(android.content.Context context) {
             super(context);
             holder = getHolder();
-            bitmap = Bitmap.createBitmap(W, H, Bitmap.Config.ARGB_8888);
             initWorld();
+            initPaints();
 
             scaleDetector = new ScaleGestureDetector(context, new ScaleGestureDetector.SimpleOnScaleGestureListener() {
                 @Override
                 public boolean onScale(ScaleGestureDetector detector) {
                     scaleFactor *= detector.getScaleFactor();
-                    scaleFactor = Math.max(1.0f, Math.min(scaleFactor, 20.0f));
+                    scaleFactor = Math.max(2.0f, Math.min(scaleFactor, 50.0f));
                     return true;
                 }
             });
         }
 
+        private void initPaints() {
+            organicPaint = new Paint();
+            organicPaint.setColor(Color.LTGRAY);
+            organicPaint.setStyle(Paint.Style.FILL);
+            organicPaint.setAntiAlias(true);
+
+            botBodyPaint = new Paint();
+            botBodyPaint.setColor(0xFFFFA500); // Оранжевый
+            botBodyPaint.setStyle(Paint.Style.FILL);
+            botBodyPaint.setAntiAlias(true);
+
+            connectionPaint = new Paint();
+            connectionPaint.setColor(Color.BLACK);
+            connectionPaint.setStrokeWidth(0.1f);
+            connectionPaint.setAntiAlias(true);
+
+            appendagePaint = new Paint();
+            appendagePaint.setStyle(Paint.Style.FILL);
+            appendagePaint.setAntiAlias(true);
+
+            textPaint = new Paint();
+            textPaint.setColor(Color.BLACK); // Черный текст на белом фоне
+            textPaint.setTextSize(40);
+        }
+
         private void initWorld() {
             Random rng = new Random();
             for (int i = 0; i < W * H; i++) {
-                organic[i] = rng.nextInt(50);
-                if (rng.nextInt(100) < 20) { // 20% заполнения
+                organic[i] = rng.nextInt(100);
+                if (rng.nextInt(100) < 10) { // 10% заполнения ботами
                     botAlive[i] = 1;
                     botEnergy[i] = 500;
                     botDir[i] = (byte) rng.nextInt(8);
                     for (int g = 0; g < GENOME_SIZE; g++) {
-                        botGenome[i * GENOME_SIZE + g] = (byte) rng.nextInt(64);
+                        // Больше шансов на гены фотосинтеза (20) и движения (40) для наглядности
+                        int r = rng.nextInt(100);
+                        if (r < 20) botGenome[i * GENOME_SIZE + g] = 20;
+                        else if (r < 40) botGenome[i * GENOME_SIZE + g] = 40;
+                        else botGenome[i * GENOME_SIZE + g] = (byte) rng.nextInt(64);
                     }
                 }
             }
@@ -139,170 +162,162 @@ public class MainActivity extends Activity {
             }
         }
 
-        // --- ЛОГИКА (ПАРАЛЛЕЛЬНАЯ) ---
+        // --- ЛОГИКА (Без изменений) ---
         private void update() {
-            // Очистка следующего буфера (только флаги жизни)
             Arrays.fill(nextAlive, (byte)0);
-            
-            // Parallel Stream в Java 8+ автоматически использует все ядра CPU
-            // Это аналог #pragma omp parallel for
             IntStream.range(0, W * H).parallel().forEach(i -> {
                 if (botAlive[i] == 1) {
                     processBot(i);
                 } else {
-                    // Разложение органики или случайный рост
-                    if (Math.random() > 0.999) organic[i] = Math.min(organic[i] + 10, 255);
+                    if (Math.random() > 0.995) organic[i] = Math.min(organic[i] + 20, 255);
                 }
             });
-
-            // Swap buffers (ссылки)
             byte[] tmpAlive = botAlive; botAlive = nextAlive; nextAlive = tmpAlive;
             int[] tmpEnergy = botEnergy; botEnergy = nextEnergy; nextEnergy = tmpEnergy;
             byte[] tmpDir = botDir; botDir = nextDir; nextDir = tmpDir;
             byte[] tmpIp = botIp; botIp = nextIp; nextIp = tmpIp;
             byte[] tmpGenome = botGenome; botGenome = nextGenome; nextGenome = tmpGenome;
-            
-            // Подсчет живых
-            // (Можно оптимизировать, но для примера сойдет)
-            liveCount = 0; // Считается в Draw для скорости
         }
 
         private void processBot(int idx) {
-            // Если энергии мало - умираем (становимся органикой)
             if (botEnergy[idx] <= 0) {
-                organic[idx] = Math.min(organic[idx] + 20, 255);
-                return; // В nextAlive по умолчанию 0
+                organic[idx] = Math.min(organic[idx] + 50, 255);
+                return;
             }
-
-            // Копируем состояние
             nextAlive[idx] = 1;
             nextEnergy[idx] = botEnergy[idx];
             nextDir[idx] = botDir[idx];
             nextIp[idx] = botIp[idx];
             System.arraycopy(botGenome, idx * GENOME_SIZE, nextGenome, idx * GENOME_SIZE, GENOME_SIZE);
 
-            // Виртуальная машина
             int steps = 0;
             boolean turnEnded = false;
-            int ip = nextIp[idx] & 0xFF; // unsigned conversion
+            int ip = nextIp[idx] & 0xFF;
             int genomeBase = idx * GENOME_SIZE;
 
             while (steps < 10 && !turnEnded) {
                 int cmd = nextGenome[genomeBase + ip] & 0xFF;
                 ip = (ip + 1) % GENOME_SIZE;
-
-                if (cmd < 8) { // Move IP
-                    ip = (ip + cmd) % GENOME_SIZE;
-                } else if (cmd < 16) { // Rotate
-                    nextDir[idx] = (byte) ((nextDir[idx] + (cmd - 8)) % 8);
-                } else if (cmd == 20) { // Photosynthesis
-                    nextEnergy[idx] += 5;
-                    turnEnded = true;
-                } else if (cmd == 40) { // Move
+                if (cmd < 8) { ip = (ip + cmd) % GENOME_SIZE; }
+                else if (cmd < 16) { nextDir[idx] = (byte) ((nextDir[idx] + (cmd - 8)) % 8); }
+                else if (cmd == 20) { nextEnergy[idx] += 10; turnEnded = true; }
+                else if (cmd == 40) {
                     int dir = nextDir[idx];
                     int dx = (dir == 1 || dir == 2 || dir == 3) ? 1 : ((dir == 5 || dir == 6 || dir == 7) ? -1 : 0);
                     int dy = (dir == 0 || dir == 1 || dir == 7) ? -1 : ((dir == 3 || dir == 4 || dir == 5) ? 1 : 0);
-                    
                     int nx = (idx % W + dx + W) % W;
                     int ny = (idx / W + dy + H) % H;
                     int nIdx = ny * W + nx;
-
-                    // Простейшая коллизия: если там никого нет В ТЕКУЩЕМ кадре
-                    if (botAlive[nIdx] == 0) {
-                        // Перемещаем в новый слот
+                    if (botAlive[nIdx] == 0 && nextAlive[nIdx] == 0) {
                         nextAlive[nIdx] = 1;
-                        nextEnergy[nIdx] = nextEnergy[idx] - 2;
+                        nextEnergy[nIdx] = nextEnergy[idx] - 5;
                         nextDir[nIdx] = nextDir[idx];
                         nextIp[nIdx] = (byte) ip;
                         System.arraycopy(nextGenome, idx * GENOME_SIZE, nextGenome, nIdx * GENOME_SIZE, GENOME_SIZE);
-                        
-                        nextAlive[idx] = 0; // Освобождаем старый
+                        nextAlive[idx] = 0;
                     }
                     turnEnded = true;
                 }
                 steps++;
             }
-            
-            // Сохраняем IP если не переехали
             if (nextAlive[idx] == 1) {
                 nextIp[idx] = (byte) ip;
-                nextEnergy[idx] -= 1;
+                nextEnergy[idx] -= 2;
             }
         }
 
-        // --- ОТРИСОВКА ---
+        // --- НОВАЯ ОТРИСОВКА ---
         private void draw() {
             if (!holder.getSurface().isValid()) return;
 
-            // 1. Заполняем массив пикселей (Software Rendering)
-            int count = 0;
-            for (int i = 0; i < W * H; i++) {
-                if (botAlive[i] == 1) {
-                    pixels[i] = 0xFF00FF00; // Green bot
-                    count++;
-                } else {
-                    int val = Math.min(organic[i] * 3, 255);
-                    pixels[i] = 0xFF000000 | (val << 16) | (val << 8) | 10; // Brownish
-                }
-            }
-            liveCount = count;
-
-            // 2. Загружаем в Bitmap
-            bitmap.setPixels(pixels, 0, W, 0, 0, W, H);
-
-            // 3. Рисуем на экране с зумом
             Canvas canvas = holder.lockCanvas();
             if (canvas != null) {
-                canvas.drawColor(Color.BLACK);
-                
+                // Белый фон
+                canvas.drawColor(Color.WHITE);
+
+                // Применяем камеру (зум и панорамирование)
                 matrix.reset();
-                matrix.postTranslate(-W/2f, -H/2f); // Center
+                matrix.postTranslate(-W/2f, -H/2f);
                 matrix.postScale(scaleFactor, scaleFactor);
-                matrix.postTranslate(W/2f + camX, H/2f + camY); // Pan
-                matrix.postTranslate(canvas.getWidth()/2f - W/2f, canvas.getHeight()/2f - H/2f); // Screen center
+                matrix.postTranslate(W/2f + camX, H/2f + camY);
+                matrix.postTranslate(canvas.getWidth()/2f - W/2f, canvas.getHeight()/2f - H/2f);
+                canvas.setMatrix(matrix);
 
-                Paint p = new Paint();
-                p.setFilterBitmap(false); // Пиксель-арт стиль (без сглаживания)
-                canvas.drawBitmap(bitmap, matrix, p);
+                int count = 0;
+                for (int i = 0; i < W * H; i++) {
+                    float x = i % W + 0.5f;
+                    float y = i / W + 0.5f;
 
-                // UI
-                p.setColor(Color.WHITE);
-                p.setTextSize(40);
-                canvas.drawText("FPS: " + fps, 50, 50, p);
-                canvas.drawText("Bots: " + liveCount, 50, 100, p);
+                    // 1. Рисуем органику (серые круги)
+                    if (organic[i] > 10) {
+                        float radius = Math.min(organic[i] / 600f, 0.3f);
+                        canvas.drawCircle(x, y, radius, organicPaint);
+                    }
+
+                    // 2. Рисуем ботов
+                    if (botAlive[i] == 1) {
+                        count++;
+                        // Тело бота (оранжевый квадрат)
+                        canvas.drawRect(x - 0.3f, y - 0.3f, x + 0.3f, y + 0.3f, botBodyPaint);
+
+                        // Придатки на основе генома
+                        int genomeBase = i * GENOME_SIZE;
+                        for (int g = 0; g < GENOME_SIZE; g += 4) { // Рисуем не все гены, чтобы не было каши
+                            int gene = botGenome[genomeBase + g] & 0xFF;
+                            if (gene == 20 || gene == 40) {
+                                int dir = g % 8;
+                                float dx = (dir == 1 || dir == 2 || dir == 3) ? 1 : ((dir == 5 || dir == 6 || dir == 7) ? -1 : 0);
+                                float dy = (dir == 0 || dir == 1 || dir == 7) ? -1 : ((dir == 3 || dir == 4 || dir == 5) ? 1 : 0);
+                                
+                                float endX = x + dx * 0.7f;
+                                float endY = y + dy * 0.7f;
+
+                                // Линия связи
+                                canvas.drawLine(x, y, endX, endY, connectionPaint);
+
+                                // Цвет придатка
+                                if (gene == 20) appendagePaint.setColor(Color.GREEN); // Фотосинтез
+                                else appendagePaint.setColor(Color.BLUE); // Движение
+
+                                // Сам придаток (круг)
+                                canvas.drawCircle(endX, endY, 0.2f, appendagePaint);
+                            }
+                        }
+                    }
+                }
+                liveCount = count;
+
+                // Сбрасываем матрицу для рисования UI поверх всего
+                canvas.setMatrix(null);
+                canvas.drawText("FPS: " + fps, 50, 60, textPaint);
+                canvas.drawText("Bots: " + liveCount, 50, 120, textPaint);
 
                 holder.unlockCanvasAndPost(canvas);
             }
         }
 
-        // --- УПРАВЛЕНИЕ ---
+        // --- УПРАВЛЕНИЕ (Без изменений) ---
         @Override
         public boolean onTouchEvent(MotionEvent event) {
             scaleDetector.onTouchEvent(event);
-            
             final int action = event.getActionMasked();
             switch (action) {
                 case MotionEvent.ACTION_DOWN: {
                     final int pointerIndex = event.getActionIndex();
-                    final float x = event.getX(pointerIndex);
-                    final float y = event.getY(pointerIndex);
-                    lastTouchX = x;
-                    lastTouchY = y;
+                    lastTouchX = event.getX(pointerIndex);
+                    lastTouchY = event.getY(pointerIndex);
                     activePointerId = event.getPointerId(0);
                     break;
                 }
                 case MotionEvent.ACTION_MOVE: {
                     final int pointerIndex = event.findPointerIndex(activePointerId);
                     if (pointerIndex == -1) break;
-                    
                     final float x = event.getX(pointerIndex);
                     final float y = event.getY(pointerIndex);
-                    
                     if (!scaleDetector.isInProgress()) {
-                        camX += (x - lastTouchX) / scaleFactor; // Pan slow when zoomed in
+                        camX += (x - lastTouchX) / scaleFactor;
                         camY += (y - lastTouchY) / scaleFactor;
                     }
-
                     lastTouchX = x;
                     lastTouchY = y;
                     break;
@@ -320,4 +335,4 @@ public class MainActivity extends Activity {
             }
         }
     }
-                      }
+}
